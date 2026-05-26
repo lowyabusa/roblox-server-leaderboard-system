@@ -1,10 +1,12 @@
-# Server-Authoritative Roblox Leaderboards
+# Roblox Leaderboard System (Global Leaderboards)
 
 A small copy-and-paste leaderboard system for Roblox games.
 
+Server-authoritative Roblox global leaderboards using `OrderedDataStore` and
+Workspace display boards.
+
 It uses trusted server code to publish all-time, daily, and weekly leaderboard
-values, `OrderedDataStore` for global ranking, and world display boards under
-`Workspace.Leaderboards`.
+values under `Workspace.Leaderboards`.
 
 ## What This Is
 
