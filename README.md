@@ -1,106 +1,119 @@
-# Server-Authoritative Plug-and-Play Leaderboards
+# Server-Authoritative Roblox Leaderboards
 
-A small Roblox leaderboard system designed for public, copy-and-paste use.
+A small copy-and-paste leaderboard system for Roblox games.
 
-The system is server-authoritative: your server code publishes trusted values with
-`LeaderboardService.SetPlayerValue`, and world display boards read those values from
-OrderedDataStores.
+It uses trusted server code to publish leaderboard values, `OrderedDataStore` for
+global ranking, and world display boards under `Workspace.Leaderboards`.
 
-## What You Copy
+## What This Is
 
-Copy this folder into your game:
+This repository is a compact Roblox leaderboard sample you can copy into
+`ServerScriptService`. It is intentionally not a framework. The public integration
+point is:
 
-```text
-src/ServerScriptService/LeaderboardSystem
+```lua
+LeaderboardService.SetPlayerValue(player, leaderboardId, value)
 ```
 
-It should end up here in Roblox Studio:
+Optional adapter helpers are included for games that already store stats in
+`state.Meta`:
 
-```text
-ServerScriptService
-  LeaderboardSystem
-    Bootstrap.server.lua
-    LeaderboardDefinitions.lua
-    LeaderboardService.lua
-    LeaderboardDisplayService.lua
+```lua
+LeaderboardService.UpdatePlayerFromState(player, state, leaderboardId)
+LeaderboardService.UpdatePlayerFromStateAll(player, state)
 ```
 
-## Quick Start
+## What Problem It Solves
 
-1. Copy `src/ServerScriptService/LeaderboardSystem` into `ServerScriptService`.
-2. Edit `LeaderboardDefinitions.lua` for your game before publishing.
-3. Open `commands/CreateWorkspaceLeaderboards.lua`.
-4. Paste that script into the Roblox Studio Command Bar and run it.
-5. Move the generated parts in `Workspace.Leaderboards` wherever you want.
-6. Publish trusted server values with `LeaderboardService.SetPlayerValue`.
+Roblox clients are not trusted for final leaderboard values. This system gives
+server scripts one clear publishing path while display boards render ranked data
+from `OrderedDataStore`.
 
-If you are installing manually in Studio, create a `Folder` named
-`LeaderboardSystem` under `ServerScriptService`. `Bootstrap.server.lua` should be
-a server `Script`; the other files in that folder should be `ModuleScript`
-instances with matching names.
+Clients may request gameplay actions, such as finishing a race or claiming a
+reward, but server code must calculate and publish the final leaderboard value.
+Do not let clients send final score, wins, level, time, or currency values to this
+service.
 
-For DataStore-backed results in live servers or Studio play tests, enable:
+## Architecture Overview
 
 ```text
-Game Settings > Security > Enable Studio Access to API Services
+Server gameplay code
+  -> LeaderboardService.SetPlayerValue(...)
+  -> debounced write queue and in-memory fallback cache
+  -> OrderedDataStore
+  -> LeaderboardDisplayService
+  -> Workspace.Leaderboards display parts
 ```
 
-## Configure Leaderboards
+Main files:
+
+| File | Responsibility |
+| --- | --- |
+| `Bootstrap.server.lua` | Starts display discovery when the server script runs. |
+| `LeaderboardDefinitions.lua` | Defines leaderboard ids, titles, store names, and display order. |
+| `LeaderboardService.lua` | Validates server values, queues writes, reads rankings, and caches fallbacks. |
+| `LeaderboardDisplayService.lua` | Finds board parts and renders generated `SurfaceGui` content. |
+| `commands/CreateWorkspaceLeaderboards.lua` | Command Bar setup script for world boards. |
+| `examples/ExampleStatPublisher.server.lua` | Minimal server-only publishing example. |
+
+More detail: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Installation
+
+1. Copy this folder into your Roblox game:
+
+   ```text
+   src/ServerScriptService/LeaderboardSystem
+   ```
+
+2. In Studio, it should look like this:
+
+   ```text
+   ServerScriptService
+     LeaderboardSystem
+       Bootstrap.server.lua
+       LeaderboardDefinitions.lua
+       LeaderboardService.lua
+       LeaderboardDisplayService.lua
+   ```
+
+3. If installing manually in Studio, create a `Folder` named
+   `LeaderboardSystem`. `Bootstrap.server.lua` should be a server `Script`; the
+   other files should be `ModuleScript` instances with matching names.
+
+4. Edit `LeaderboardDefinitions.lua` for your game.
+
+5. Paste and run `commands/CreateWorkspaceLeaderboards.lua` in the Roblox Studio
+   Command Bar.
+
+6. Move the generated parts in `Workspace.Leaderboards` where you want them.
+
+Rojo is optional for repository contributors. Roblox Studio users can install this
+by copying files directly.
+
+## Configuration
 
 `LeaderboardDefinitions.lua` is the source of truth.
 
-Each definition has:
+To add or remove a leaderboard, edit `DEFINITIONS_BY_ID` and keep `ORDER` in the
+same file aligned with the ids you want to create and display.
 
 | Field | Purpose |
 | --- | --- |
 | `Id` | Stable id used by code and the `LeaderboardId` Workspace attribute. |
 | `DisplayName` | Default board title. |
-| `MetaKey` | Optional key for the `UpdatePlayerFromState` adapter helpers. |
-| `DataStoreName` | OrderedDataStore name. Change the prefix for your own game. |
-| `SortAscending` | `false` means highest value wins. `true` means lowest value wins. |
-| `TopCount` | Default number of rows. |
-| `RemoveZeroValues` | Removes zero values from the OrderedDataStore when true. |
+| `MetaKey` | Key used by the optional `UpdatePlayerFromState` helpers. |
+| `DataStoreName` | `OrderedDataStore` name. The included names are samples. |
+| `SortAscending` | `false` means highest value ranks first. |
+| `TopCount` | Default row count for generated boards and reads. |
+| `RemoveZeroValues` | Removes zero values from the `OrderedDataStore` when true. |
 
-Also update `ORDER` so it contains exactly the ids you want, in the order you want
-the Command Bar script to create boards.
+Before publishing a real game, replace the sample `GenericLeaderboard_*`
+`DataStoreName` values with names owned by your game.
 
-## Create World Boards
+## Publishing Trusted Values
 
-The Command Bar script creates or updates:
-
-```text
-Workspace
-  Leaderboards
-    Leaderboard_Score
-    Leaderboard_Wins
-    Leaderboard_Level
-```
-
-The script is idempotent. Running it again updates attributes and creates missing
-boards, but it does not duplicate existing boards.
-
-## Workspace Attributes
-
-Display parts live under `Workspace.Leaderboards`.
-
-Required attribute:
-
-| Attribute | Type | Purpose |
-| --- | --- | --- |
-| `LeaderboardId` | string | Must match a definition `Id`. |
-
-Optional attributes:
-
-| Attribute | Type | Default |
-| --- | --- | --- |
-| `LeaderboardTitle` | string | Definition `DisplayName`. |
-| `LeaderboardTopCount` | number | Definition `TopCount`, clamped for display. |
-| `LeaderboardRefreshSeconds` | number | `120`. |
-| `LeaderboardFace` | string | `Front`. Supports `Front`, `Back`, `Left`, `Right`, `Top`, `Bottom`. |
-
-## Publish Values From Server Code
-
-Use `SetPlayerValue` from a server Script only:
+Publish from a server `Script` only:
 
 ```lua
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -115,40 +128,102 @@ if not success then
 end
 ```
 
-Do not let clients send leaderboard values directly. Clients can request gameplay
-actions, but the server must decide the final value.
+`SetPlayerValue` accepts a `Player` or positive numeric user id, a registered
+leaderboard id, and a finite number. Invalid ids, invalid users, non-number
+values, `NaN`, and infinite values return `false` plus a reason string.
 
-See `examples/ExampleStatPublisher.server.lua` for a minimal server-owned score
-publisher.
+Do not create a `RemoteEvent` that forwards client-submitted values into
+`SetPlayerValue`. If a client requests an action, validate the action on the
+server and publish the server-owned result.
 
-## Optional State Adapter
+## Workspace Display Boards
 
-If your game already stores stats in `state.Meta`, you can use:
+Display parts must live under:
 
-```lua
-LeaderboardService.UpdatePlayerFromState(player, state, "Score")
-LeaderboardService.UpdatePlayerFromStateAll(player, state)
+```text
+Workspace
+  Leaderboards
 ```
 
-For new integrations, prefer `SetPlayerValue` because it is simpler and more explicit.
+Required attribute:
 
-## Runtime Behavior
+| Attribute | Type | Purpose |
+| --- | --- | --- |
+| `LeaderboardId` | string | Must match a definition `Id`. |
 
-- `Bootstrap.server.lua` initializes the system automatically.
-- `LeaderboardDisplayService` scans `Workspace.Leaderboards`.
-- Display parts added later are registered when they have a `LeaderboardId` attribute.
-- DataStore reads are cached briefly to avoid unnecessary request pressure.
+Optional attributes:
+
+| Attribute | Type | Default |
+| --- | --- | --- |
+| `LeaderboardTitle` | string | Definition `DisplayName`. |
+| `LeaderboardTopCount` | number | Definition `TopCount`, clamped for display. |
+| `LeaderboardRefreshSeconds` | number | `120`. |
+| `LeaderboardFace` | string | `Front`; supports `Front`, `Back`, `Left`, `Right`, `Top`, `Bottom`. |
+
+Run `commands/CreateWorkspaceLeaderboards.lua` again after changing definitions.
+The script updates existing boards and creates missing boards without duplicating
+boards for the same `LeaderboardId`.
+
+## DataStore Behavior
+
+- Rankings use `OrderedDataStore` through each definition's `DataStoreName`.
+- Writes are debounced so repeated updates for the same player do not immediately
+  create repeated DataStore writes.
 - Failed writes are retried with backoff.
-- If DataStore reads fail, the board can temporarily render recent in-memory values.
+- Reads are cached briefly to control request pressure.
+- If a DataStore read fails, display boards can temporarily show cached or recent
+  in-memory values.
+- On server shutdown, the service attempts a bounded flush of pending writes.
 
-## Before Publishing
+For DataStore-backed results in Studio play tests, enable:
 
-1. Rename sample definitions to your real leaderboard ids.
-2. Change `DataStoreName` values to names owned by your game.
-3. Run the Command Bar script after editing definitions.
-4. Confirm API Services are enabled.
-5. Test a server-side `SetPlayerValue` call in Studio.
+```text
+Game Settings > Security > Enable Studio Access to API Services
+```
+
+## Security Model
+
+The trust boundary is simple:
+
+- Server gameplay code is trusted to calculate final values.
+- Client code is untrusted and must not publish final leaderboard values.
+- Display boards are read-only presentation.
+
+More detail: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
+
+## Limitations
+
+- This is a small sample, not a full leaderboard platform.
+- It does not include client UI, admin tools, anti-cheat systems, migrations, or
+  analytics.
+- It does not validate whether your gameplay rules are fair; it only keeps final
+  leaderboard publishing on the server.
+- Studio DataStore behavior depends on API Services being enabled and the place
+  being able to use DataStores.
+
+## Troubleshooting
+
+See [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for practical checks.
+
+Common first checks:
+
+- Confirm `LeaderboardSystem` is in `ServerScriptService`.
+- Confirm `Workspace.Leaderboards` exists.
+- Confirm each board has a valid `LeaderboardId` attribute.
+- Enable Studio API Services for DataStore-backed tests.
+- Publish a value from a server `Script`, not from a client.
+
+## Roadmap
+
+Small improvements that fit the current shape:
+
+- Add focused Luau tests if the repository gains a test runner.
+- Add more example definitions for common game stat types.
+- Add an optional plain Studio setup checklist screenshot.
+
+Out of scope for this sample: remotes for client-submitted values, a framework
+rewrite, external services, or package dependencies.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).

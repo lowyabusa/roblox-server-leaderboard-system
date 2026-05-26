@@ -4,20 +4,15 @@ local LeaderboardService = require(script.Parent:WaitForChild("LeaderboardServic
 
 local LeaderboardDisplayService = {}
 
--- Workspace.Leaderboards is intentionally kept as the plug-and-play board container.
 local LEADERBOARDS_FOLDER_NAME = "Leaderboards"
 local SURFACE_GUI_NAME = "LeaderboardSurfaceGui"
 
--- Display defaults are used when Workspace part attributes are missing or invalid.
 local DEFAULT_TOP_COUNT = 10
 local MAX_DISPLAY_TOP_COUNT = 25
 local DEFAULT_REFRESH_SECONDS = 120
 local DEFAULT_FACE = Enum.NormalId.Front
 
--- registeredDisplaysByPart tracks live BaseParts that should be refreshed.
 local registeredDisplaysByPart = {}
-
--- candidateAttributeConnectionsByPart watches late-added parts until LeaderboardId is set.
 local candidateAttributeConnectionsByPart = {}
 
 local refreshLoopRunning = false
@@ -25,33 +20,83 @@ local workspaceFolderConnection = nil
 local folderDescendantConnection = nil
 local watchedLeaderboardFolder = nil
 
--- UI scale and layout constants keep the generated SurfaceGui deterministic.
-local BOARD_SCALE = 1
+local THEME = {
+	BoardScale = 1,
 
-local ROOT_PADDING_X_SCALE = 0.032
-local ROOT_PADDING_Y_SCALE = 0.032
-local ROOT_LAYOUT_PADDING_SCALE = 0.018
+	RootPaddingXScale = 0.032,
+	RootPaddingYScale = 0.032,
+	RootLayoutPaddingScale = 0.018,
 
-local HEADER_HEIGHT_SCALE = 0.135
-local LIST_HEIGHT_SCALE = 0.775
-local ROW_LAYOUT_PADDING_SCALE = 0.012
+	HeaderHeightScale = 0.135,
+	ListHeightScale = 0.775,
+	RowLayoutPaddingScale = 0.012,
 
-local RANK_WIDTH_SCALE = 0.14
-local NAME_WIDTH_SCALE = 0.69
-local VALUE_WIDTH_SCALE = 0.17
+	RankWidthScale = 0.14,
+	NameWidthScale = 0.69,
+	ValueWidthScale = 0.17,
 
-local NAME_LEFT_PADDING_SCALE = 0.025
-local VALUE_RIGHT_PADDING_SCALE = 0.045
+	NameLeftPaddingScale = 0.025,
+	ValueRightPaddingScale = 0.045,
 
-local FRAME_STROKE_THICKNESS = 5
-local ROW_STROKE_THICKNESS = 4
-local TEXT_STROKE_THICKNESS = 3
+	FrameStrokeThickness = 5,
+	RowStrokeThickness = 4,
+	TextStrokeThickness = 3,
 
-local ROOT_CORNER_RADIUS_SCALE = 0.035
-local PANEL_CORNER_RADIUS_SCALE = 0.035
-local HEADER_CORNER_RADIUS_SCALE = 0.16
-local ROW_CORNER_RADIUS_SCALE = 0.18
-local LABEL_CORNER_RADIUS_SCALE = 0.16
+	RootCornerRadiusScale = 0.035,
+	PanelCornerRadiusScale = 0.035,
+	HeaderCornerRadiusScale = 0.16,
+	RowCornerRadiusScale = 0.18,
+	LabelCornerRadiusScale = 0.16,
+
+	RootBackground = Color3.fromRGB(18, 24, 54),
+	RootGradientA = Color3.fromRGB(14, 34, 82),
+	RootGradientB = Color3.fromRGB(92, 34, 128),
+	RootStroke = Color3.fromRGB(125, 215, 255),
+
+	HeaderBackground = Color3.fromRGB(78, 117, 117),
+	HeaderText = Color3.fromRGB(255, 238, 165),
+	HeaderStroke = Color3.fromRGB(255, 210, 92),
+	HeaderTextStroke = Color3.fromRGB(4, 8, 18),
+	DarkTextStroke = Color3.fromRGB(3, 6, 12),
+
+	ListBackground = Color3.fromRGB(18, 32, 68),
+	ListGradientA = Color3.fromRGB(18, 46, 92),
+	ListGradientB = Color3.fromRGB(58, 28, 88),
+	ListStroke = Color3.fromRGB(105, 170, 230),
+
+	RowBackground = Color3.fromRGB(34, 58, 104),
+	RowStroke = Color3.fromRGB(115, 195, 255),
+	EmptyBackground = Color3.fromRGB(20, 28, 46),
+	Text = Color3.fromRGB(255, 255, 255),
+	LabelBackground = Color3.fromRGB(255, 255, 255),
+}
+
+local BOARD_SCALE = THEME.BoardScale
+
+local ROOT_PADDING_X_SCALE = THEME.RootPaddingXScale
+local ROOT_PADDING_Y_SCALE = THEME.RootPaddingYScale
+local ROOT_LAYOUT_PADDING_SCALE = THEME.RootLayoutPaddingScale
+
+local HEADER_HEIGHT_SCALE = THEME.HeaderHeightScale
+local LIST_HEIGHT_SCALE = THEME.ListHeightScale
+local ROW_LAYOUT_PADDING_SCALE = THEME.RowLayoutPaddingScale
+
+local RANK_WIDTH_SCALE = THEME.RankWidthScale
+local NAME_WIDTH_SCALE = THEME.NameWidthScale
+local VALUE_WIDTH_SCALE = THEME.ValueWidthScale
+
+local NAME_LEFT_PADDING_SCALE = THEME.NameLeftPaddingScale
+local VALUE_RIGHT_PADDING_SCALE = THEME.ValueRightPaddingScale
+
+local FRAME_STROKE_THICKNESS = THEME.FrameStrokeThickness
+local ROW_STROKE_THICKNESS = THEME.RowStrokeThickness
+local TEXT_STROKE_THICKNESS = THEME.TextStrokeThickness
+
+local ROOT_CORNER_RADIUS_SCALE = THEME.RootCornerRadiusScale
+local PANEL_CORNER_RADIUS_SCALE = THEME.PanelCornerRadiusScale
+local HEADER_CORNER_RADIUS_SCALE = THEME.HeaderCornerRadiusScale
+local ROW_CORNER_RADIUS_SCALE = THEME.RowCornerRadiusScale
+local LABEL_CORNER_RADIUS_SCALE = THEME.LabelCornerRadiusScale
 
 local FACE_BY_NAME = {
 	Front = Enum.NormalId.Front,
@@ -62,12 +107,10 @@ local FACE_BY_NAME = {
 	Bottom = Enum.NormalId.Bottom,
 }
 
--- Converts user input into a whole number that is never below zero.
 local function sanitizeWholeNumber(value)
 	return math.max(0, math.floor(tonumber(value) or 0))
 end
 
--- Returns a positive number or the provided fallback.
 local function sanitizePositiveNumber(value, fallback)
 	local numberValue = tonumber(value)
 	if numberValue == nil or numberValue <= 0 then
@@ -77,7 +120,6 @@ local function sanitizePositiveNumber(value, fallback)
 	return numberValue
 end
 
--- Converts user input into a non-empty leaderboard id or nil.
 local function sanitizeLeaderboardId(value)
 	local leaderboardId = tostring(value or "")
 	if leaderboardId == "" then
@@ -87,7 +129,6 @@ local function sanitizeLeaderboardId(value)
 	return leaderboardId
 end
 
--- Finds the required Workspace.Leaderboards folder without creating it at runtime.
 local function getLeaderboardFolder()
 	local folder = Workspace:FindFirstChild(LEADERBOARDS_FOLDER_NAME)
 	if folder and folder:IsA("Folder") then
@@ -97,7 +138,6 @@ local function getLeaderboardFolder()
 	return nil
 end
 
--- Reads the optional LeaderboardFace attribute from a display part.
 local function getSurfaceFace(part)
 	local attributeValue = part:GetAttribute("LeaderboardFace")
 	local faceName = tostring(attributeValue or "")
@@ -109,7 +149,6 @@ local function getSurfaceFace(part)
 	return DEFAULT_FACE
 end
 
--- Reads and clamps the optional LeaderboardTopCount attribute from a display part.
 local function getTopCount(part)
 	return math.min(
 		MAX_DISPLAY_TOP_COUNT,
@@ -120,12 +159,10 @@ local function getTopCount(part)
 	)
 end
 
--- Reads the optional LeaderboardRefreshSeconds attribute from a display part.
 local function getRefreshSeconds(part)
 	return sanitizePositiveNumber(part:GetAttribute("LeaderboardRefreshSeconds"), DEFAULT_REFRESH_SECONDS)
 end
 
--- Removes old generated UI before a fresh render.
 local function clearChildren(instance)
 	if not instance then
 		return
@@ -136,7 +173,6 @@ local function clearChildren(instance)
 	end
 end
 
--- Creates a two-color UIGradient sequence.
 local function createColorSequence(colorA, colorB)
 	return ColorSequence.new({
 		ColorSequenceKeypoint.new(0, colorA),
@@ -144,7 +180,6 @@ local function createColorSequence(colorA, colorB)
 	})
 end
 
--- Adds a UIGradient to a generated UI element.
 local function addGradient(parent, colorA, colorB, rotation)
 	local gradient = Instance.new("UIGradient")
 	gradient.Name = "Gradient"
@@ -155,7 +190,6 @@ local function addGradient(parent, colorA, colorB, rotation)
 	return gradient
 end
 
--- Adds rounded corners to a generated UI element.
 local function addCorner(parent, radiusScale)
 	local corner = Instance.new("UICorner")
 	corner.Name = "Corner"
@@ -165,7 +199,6 @@ local function addCorner(parent, radiusScale)
 	return corner
 end
 
--- Adds a border stroke to a generated frame or label.
 local function addFrameStroke(parent, color, transparency, thickness)
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = "Stroke"
@@ -179,7 +212,6 @@ local function addFrameStroke(parent, color, transparency, thickness)
 	return stroke
 end
 
--- Adds a text stroke to keep text legible on bright gradients.
 local function addTextStroke(parent, color, transparency, thickness)
 	local stroke = Instance.new("UIStroke")
 	stroke.Name = "TextStroke"
@@ -193,7 +225,28 @@ local function addTextStroke(parent, color, transparency, thickness)
 	return stroke
 end
 
--- Calculates row height so every requested slot fits on the board.
+local function addPadding(parent, name, padding)
+	local uiPadding = Instance.new("UIPadding")
+	uiPadding.Name = name
+	uiPadding.PaddingTop = padding.Top or UDim.new(0, 0)
+	uiPadding.PaddingBottom = padding.Bottom or UDim.new(0, 0)
+	uiPadding.PaddingLeft = padding.Left or UDim.new(0, 0)
+	uiPadding.PaddingRight = padding.Right or UDim.new(0, 0)
+	uiPadding.Parent = parent
+
+	return uiPadding
+end
+
+local function addListLayout(parent, paddingScale)
+	local layout = Instance.new("UIListLayout")
+	layout.Name = "Layout"
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(paddingScale, 0)
+	layout.Parent = parent
+
+	return layout
+end
+
 local function getRowHeightScale(rowSlotCount)
 	local safeCount = math.max(1, sanitizeWholeNumber(rowSlotCount))
 	local totalPadding = ROW_LAYOUT_PADDING_SCALE * math.max(0, safeCount - 1)
@@ -202,7 +255,6 @@ local function getRowHeightScale(rowSlotCount)
 	return remaining / safeCount
 end
 
--- Returns medal-style text colors for the rank label.
 local function getRankTextGradientColors(rank)
 	if rank == 1 then
 		return Color3.fromRGB(255, 238, 145), Color3.fromRGB(255, 176, 48)
@@ -219,7 +271,6 @@ local function getRankTextGradientColors(rank)
 	return Color3.fromRGB(210, 245, 255), Color3.fromRGB(95, 190, 255)
 end
 
--- Returns row background colors with special treatment for top ranks.
 local function getRowGradientColors(rank)
 	if rank == 1 then
 		return Color3.fromRGB(112, 76, 18), Color3.fromRGB(34, 68, 124)
@@ -240,7 +291,6 @@ local function getRowGradientColors(rank)
 	return Color3.fromRGB(58, 52, 124), Color3.fromRGB(28, 74, 112)
 end
 
--- Reuses the generated SurfaceGui on rerender, or creates it on first render.
 local function getOrCreateSurfaceGui(part)
 	local existing = part:FindFirstChild(SURFACE_GUI_NAME)
 	if existing and existing:IsA("SurfaceGui") then
@@ -260,12 +310,11 @@ local function getOrCreateSurfaceGui(part)
 	return surfaceGui
 end
 
--- Creates the root frame for one leaderboard render.
 local function createRootFrame(surfaceGui)
 	local root = Instance.new("Frame")
 	root.Name = "Root"
 	root.Size = UDim2.fromScale(1, 1)
-	root.BackgroundColor3 = Color3.fromRGB(18, 24, 54)
+	root.BackgroundColor3 = THEME.RootBackground
 	root.BackgroundTransparency = 0
 	root.BorderSizePixel = 0
 	root.Parent = surfaceGui
@@ -279,47 +328,40 @@ local function createRootFrame(surfaceGui)
 
 	addGradient(
 		root,
-		Color3.fromRGB(14, 34, 82),
-		Color3.fromRGB(92, 34, 128),
+		THEME.RootGradientA,
+		THEME.RootGradientB,
 		35
 	)
 
 	addFrameStroke(
 		root,
-		Color3.fromRGB(125, 215, 255),
+		THEME.RootStroke,
 		0.16,
 		FRAME_STROKE_THICKNESS
 	)
 
-	local padding = Instance.new("UIPadding")
-	padding.Name = "Padding"
-	padding.PaddingTop = UDim.new(ROOT_PADDING_Y_SCALE, 0)
-	padding.PaddingBottom = UDim.new(ROOT_PADDING_Y_SCALE, 0)
-	padding.PaddingLeft = UDim.new(ROOT_PADDING_X_SCALE, 0)
-	padding.PaddingRight = UDim.new(ROOT_PADDING_X_SCALE, 0)
-	padding.Parent = root
-
-	local layout = Instance.new("UIListLayout")
-	layout.Name = "Layout"
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(ROOT_LAYOUT_PADDING_SCALE, 0)
-	layout.Parent = root
+	addPadding(root, "Padding", {
+		Top = UDim.new(ROOT_PADDING_Y_SCALE, 0),
+		Bottom = UDim.new(ROOT_PADDING_Y_SCALE, 0),
+		Left = UDim.new(ROOT_PADDING_X_SCALE, 0),
+		Right = UDim.new(ROOT_PADDING_X_SCALE, 0),
+	})
+	addListLayout(root, ROOT_LAYOUT_PADDING_SCALE)
 
 	return root
 end
 
--- Creates the board title/header.
 local function createHeader(root, titleText)
 	local title = Instance.new("TextLabel")
 	title.Name = "Title"
 	title.LayoutOrder = 1
 	title.Size = UDim2.fromScale(1, HEADER_HEIGHT_SCALE)
-	title.BackgroundColor3 = Color3.fromRGB(78, 117, 117)
+	title.BackgroundColor3 = THEME.HeaderBackground
 	title.BackgroundTransparency = 0
 	title.BorderSizePixel = 0
 	title.Font = Enum.Font.GothamBlack
 	title.Text = tostring(titleText or "Leaderboard")
-	title.TextColor3 = Color3.fromRGB(255, 238, 165)
+	title.TextColor3 = THEME.HeaderText
 	title.TextScaled = true
 	title.TextXAlignment = Enum.TextXAlignment.Center
 	title.TextYAlignment = Enum.TextYAlignment.Center
@@ -329,14 +371,14 @@ local function createHeader(root, titleText)
 
 	addFrameStroke(
 		title,
-		Color3.fromRGB(255, 210, 92),
+		THEME.HeaderStroke,
 		0.12,
 		ROW_STROKE_THICKNESS
 	)
 
 	addTextStroke(
 		title,
-		Color3.fromRGB(4, 8, 18),
+		THEME.HeaderTextStroke,
 		0,
 		TEXT_STROKE_THICKNESS
 	)
@@ -344,13 +386,12 @@ local function createHeader(root, titleText)
 	return title
 end
 
--- Creates the container that holds all leaderboard rows.
 local function createListFrame(root)
 	local list = Instance.new("Frame")
 	list.Name = "List"
 	list.LayoutOrder = 2
 	list.Size = UDim2.fromScale(1, LIST_HEIGHT_SCALE)
-	list.BackgroundColor3 = Color3.fromRGB(18, 32, 68)
+	list.BackgroundColor3 = THEME.ListBackground
 	list.BackgroundTransparency = 0
 	list.BorderSizePixel = 0
 	list.Parent = root
@@ -359,39 +400,34 @@ local function createListFrame(root)
 
 	addGradient(
 		list,
-		Color3.fromRGB(18, 46, 92),
-		Color3.fromRGB(58, 28, 88),
+		THEME.ListGradientA,
+		THEME.ListGradientB,
 		90
 	)
 
 	addFrameStroke(
 		list,
-		Color3.fromRGB(105, 170, 230),
+		THEME.ListStroke,
 		0.48,
 		ROW_STROKE_THICKNESS
 	)
 
-	local layout = Instance.new("UIListLayout")
-	layout.Name = "Layout"
-	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(ROW_LAYOUT_PADDING_SCALE, 0)
-	layout.Parent = list
+	addListLayout(list, ROW_LAYOUT_PADDING_SCALE)
 
 	return list
 end
 
--- Creates the rank label for one row.
 local function createRankLabel(row, rank)
 	local rankLabel = Instance.new("TextLabel")
 	rankLabel.Name = "Rank"
 	rankLabel.Size = UDim2.fromScale(RANK_WIDTH_SCALE, 1)
 	rankLabel.Position = UDim2.fromScale(0, 0)
-	rankLabel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	rankLabel.BackgroundColor3 = THEME.LabelBackground
 	rankLabel.BackgroundTransparency = 0.35
 	rankLabel.BorderSizePixel = 0
 	rankLabel.Font = Enum.Font.GothamBold
 	rankLabel.Text = "#" .. tostring(rank)
-	rankLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	rankLabel.TextColor3 = THEME.Text
 	rankLabel.TextScaled = true
 	rankLabel.TextXAlignment = Enum.TextXAlignment.Center
 	rankLabel.TextYAlignment = Enum.TextYAlignment.Center
@@ -401,23 +437,22 @@ local function createRankLabel(row, rank)
 
 	local colorA, colorB = getRankTextGradientColors(rank)
 	addGradient(rankLabel, colorA, colorB, 0)
-	addTextStroke(rankLabel, Color3.fromRGB(3, 6, 12), 0.16, TEXT_STROKE_THICKNESS)
+	addTextStroke(rankLabel, THEME.DarkTextStroke, 0.16, TEXT_STROKE_THICKNESS)
 
 	return rankLabel
 end
 
--- Creates the player name label for one row.
 local function createNameLabel(row, playerName)
 	local nameLabel = Instance.new("TextLabel")
 	nameLabel.Name = "PlayerName"
 	nameLabel.Size = UDim2.fromScale(NAME_WIDTH_SCALE, 1)
 	nameLabel.Position = UDim2.fromScale(RANK_WIDTH_SCALE, 0)
-	nameLabel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	nameLabel.BackgroundColor3 = THEME.LabelBackground
 	nameLabel.BackgroundTransparency = 0.55
 	nameLabel.BorderSizePixel = 0
 	nameLabel.Font = Enum.Font.GothamBold
 	nameLabel.Text = tostring(playerName or "Unknown")
-	nameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	nameLabel.TextColor3 = THEME.Text
 	nameLabel.TextScaled = true
 	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
 	nameLabel.TextYAlignment = Enum.TextYAlignment.Center
@@ -426,35 +461,33 @@ local function createNameLabel(row, playerName)
 
 	addCorner(nameLabel, LABEL_CORNER_RADIUS_SCALE)
 
-	local padding = Instance.new("UIPadding")
-	padding.Name = "LeftPadding"
-	padding.PaddingLeft = UDim.new(NAME_LEFT_PADDING_SCALE, 0)
-	padding.Parent = nameLabel
+	addPadding(nameLabel, "LeftPadding", {
+		Left = UDim.new(NAME_LEFT_PADDING_SCALE, 0),
+	})
 
 	addGradient(
 		nameLabel,
-		Color3.fromRGB(255, 255, 255),
+		THEME.Text,
 		Color3.fromRGB(170, 230, 255),
 		0
 	)
 
-	addTextStroke(nameLabel, Color3.fromRGB(3, 6, 12), 0.2, TEXT_STROKE_THICKNESS)
+	addTextStroke(nameLabel, THEME.DarkTextStroke, 0.2, TEXT_STROKE_THICKNESS)
 
 	return nameLabel
 end
 
--- Creates the numeric value label for one row.
 local function createValueLabel(row, value)
 	local valueLabel = Instance.new("TextLabel")
 	valueLabel.Name = "Value"
 	valueLabel.Size = UDim2.fromScale(VALUE_WIDTH_SCALE, 1)
 	valueLabel.Position = UDim2.fromScale(RANK_WIDTH_SCALE + NAME_WIDTH_SCALE, 0)
-	valueLabel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	valueLabel.BackgroundColor3 = THEME.LabelBackground
 	valueLabel.BackgroundTransparency = 0.4
 	valueLabel.BorderSizePixel = 0
 	valueLabel.Font = Enum.Font.GothamBlack
 	valueLabel.Text = tostring(sanitizeWholeNumber(value))
-	valueLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	valueLabel.TextColor3 = THEME.Text
 	valueLabel.TextScaled = true
 	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
 	valueLabel.TextYAlignment = Enum.TextYAlignment.Center
@@ -462,10 +495,9 @@ local function createValueLabel(row, value)
 
 	addCorner(valueLabel, LABEL_CORNER_RADIUS_SCALE)
 
-	local valuePadding = Instance.new("UIPadding")
-	valuePadding.Name = "RightPadding"
-	valuePadding.PaddingRight = UDim.new(VALUE_RIGHT_PADDING_SCALE, 0)
-	valuePadding.Parent = valueLabel
+	addPadding(valueLabel, "RightPadding", {
+		Right = UDim.new(VALUE_RIGHT_PADDING_SCALE, 0),
+	})
 
 	addGradient(
 		valueLabel,
@@ -474,18 +506,17 @@ local function createValueLabel(row, value)
 		0
 	)
 
-	addTextStroke(valueLabel, Color3.fromRGB(3, 6, 12), 0.12, TEXT_STROKE_THICKNESS)
+	addTextStroke(valueLabel, THEME.DarkTextStroke, 0.12, TEXT_STROKE_THICKNESS)
 
 	return valueLabel
 end
 
--- Creates a complete leaderboard row.
 local function createRow(list, rank, playerName, value, rowHeightScale)
 	local row = Instance.new("Frame")
 	row.Name = "Row_" .. tostring(rank)
 	row.LayoutOrder = rank
 	row.Size = UDim2.fromScale(1, rowHeightScale)
-	row.BackgroundColor3 = Color3.fromRGB(34, 58, 104)
+	row.BackgroundColor3 = THEME.RowBackground
 	row.BackgroundTransparency = 0
 	row.BorderSizePixel = 0
 	row.Parent = list
@@ -497,7 +528,7 @@ local function createRow(list, rank, playerName, value, rowHeightScale)
 
 	addFrameStroke(
 		row,
-		Color3.fromRGB(115, 195, 255),
+		THEME.RowStroke,
 		rank <= 3 and 0.16 or 0.4,
 		ROW_STROKE_THICKNESS
 	)
@@ -509,18 +540,17 @@ local function createRow(list, rank, playerName, value, rowHeightScale)
 	return row
 end
 
--- Creates the empty/error row shown when no entries can be displayed.
 local function createEmptyRow(list, rowHeightScale, message)
 	local row = Instance.new("TextLabel")
 	row.Name = "Empty"
 	row.LayoutOrder = 1
 	row.Size = UDim2.fromScale(1, rowHeightScale)
-	row.BackgroundColor3 = Color3.fromRGB(20, 28, 46)
+	row.BackgroundColor3 = THEME.EmptyBackground
 	row.BackgroundTransparency = 0.16
 	row.BorderSizePixel = 0
 	row.Font = Enum.Font.GothamBold
 	row.Text = tostring(message or "No entries yet")
-	row.TextColor3 = Color3.fromRGB(255, 255, 255)
+	row.TextColor3 = THEME.Text
 	row.TextScaled = true
 	row.TextXAlignment = Enum.TextXAlignment.Center
 	row.TextYAlignment = Enum.TextYAlignment.Center
@@ -537,17 +567,16 @@ local function createEmptyRow(list, rowHeightScale, message)
 
 	addFrameStroke(
 		row,
-		Color3.fromRGB(105, 170, 230),
+		THEME.ListStroke,
 		0.5,
 		ROW_STROKE_THICKNESS
 	)
 
-	addTextStroke(row, Color3.fromRGB(3, 6, 12), 0.2, TEXT_STROKE_THICKNESS)
+	addTextStroke(row, THEME.DarkTextStroke, 0.2, TEXT_STROKE_THICKNESS)
 
 	return row
 end
 
--- Renders a complete snapshot into the part's SurfaceGui.
 local function renderSnapshot(part, snapshot, topCount)
 	local surfaceGui = getOrCreateSurfaceGui(part)
 	clearChildren(surfaceGui)

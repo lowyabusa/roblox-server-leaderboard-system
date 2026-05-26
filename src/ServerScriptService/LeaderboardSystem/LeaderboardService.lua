@@ -12,6 +12,8 @@ local MAX_TOP_COUNT = 100
 local SNAPSHOT_CACHE_SECONDS = 60
 local STALE_SNAPSHOT_CACHE_SECONDS = 300
 
+local SHUTDOWN_FLUSH_SECONDS = 20
+
 local WRITE_DEBOUNCE_SECONDS = 8
 local WRITE_RETRY_BASE_SECONDS = 3
 local WRITE_RETRY_MAX_SECONDS = 120
@@ -44,30 +46,62 @@ local pendingNameLookupsByUserId = {}
 
 local isInitialized = false
 local writeQueueRunning = false
+local shutdownFlushRegistered = false
 
--- Converts user input into a whole number that is never below zero.
-local function sanitizeWholeNumber(value)
-	return math.max(0, math.floor(tonumber(value) or 0))
-end
-
--- Converts user input into a non-empty leaderboard id or nil.
-local function sanitizeLeaderboardId(value)
-	local leaderboardId = tostring(value or "")
-	if leaderboardId == "" then
+local function toFiniteNumber(value)
+	local numberValue = tonumber(value)
+	if numberValue == nil or numberValue ~= numberValue or numberValue == math.huge or numberValue == -math.huge then
 		return nil
 	end
 
-	return leaderboardId
+	return numberValue
 end
 
--- Clamps requested row counts through the central definition helper.
+local function sanitizeWholeNumber(value)
+	local numberValue = toFiniteNumber(value)
+	if numberValue == nil then
+		return 0
+	end
+
+	return math.max(0, math.floor(numberValue))
+end
+
+local function sanitizeSubmittedValue(value)
+	if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then
+		return nil
+	end
+
+	return math.max(0, math.floor(value))
+end
+
+local function sanitizeLeaderboardId(value)
+	if type(value) ~= "string" or value == "" then
+		return nil
+	end
+
+	return value
+end
+
+local function getPublicDefinition(leaderboardId)
+	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
+	if safeLeaderboardId == nil then
+		return nil, "InvalidLeaderboardId"
+	end
+
+	local definition = LeaderboardDefinitions.GetDefinition(safeLeaderboardId)
+	if type(definition) ~= "table" then
+		return nil, "UnknownLeaderboard"
+	end
+
+	return definition, nil
+end
+
 local function sanitizeTopCount(value, fallback)
 	return LeaderboardDefinitions.NormalizeTopCount(value, fallback or DEFAULT_TOP_COUNT, MAX_TOP_COUNT)
 end
 
--- Accepts Roblox user ids only when they are positive whole numbers.
 local function sanitizeUserId(value)
-	local userId = tonumber(value)
+	local userId = toFiniteNumber(value)
 	if userId == nil then
 		return nil
 	end
@@ -80,7 +114,6 @@ local function sanitizeUserId(value)
 	return userId
 end
 
--- Allows public APIs to receive either a Player instance or a raw UserId.
 local function getUserIdFromPlayerOrUserId(playerOrUserId)
 	if typeof(playerOrUserId) == "Instance" and playerOrUserId:IsA("Player") then
 		return playerOrUserId.UserId
@@ -89,7 +122,6 @@ local function getUserIdFromPlayerOrUserId(playerOrUserId)
 	return sanitizeUserId(playerOrUserId)
 end
 
--- Reads a validated copy of a definition by leaderboard id.
 local function getDefinition(leaderboardId)
 	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
 	if safeLeaderboardId == nil then
@@ -99,7 +131,6 @@ local function getDefinition(leaderboardId)
 	return LeaderboardDefinitions.GetDefinition(safeLeaderboardId)
 end
 
--- Creates or returns the in-memory fallback bucket for one leaderboard.
 local function getMemoryBucket(leaderboardId)
 	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
 	if safeLeaderboardId == nil then
@@ -115,7 +146,6 @@ local function getMemoryBucket(leaderboardId)
 	return bucket
 end
 
--- Creates or returns the last-submitted value bucket for one leaderboard.
 local function getLastSubmittedBucket(leaderboardId)
 	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
 	if safeLeaderboardId == nil then
@@ -131,7 +161,6 @@ local function getLastSubmittedBucket(leaderboardId)
 	return bucket
 end
 
--- Creates or returns the pending write bucket for one leaderboard.
 local function getPendingWriteBucket(leaderboardId)
 	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
 	if safeLeaderboardId == nil then
@@ -147,12 +176,10 @@ local function getPendingWriteBucket(leaderboardId)
 	return bucket
 end
 
--- Builds the cache key used for leaderboard id plus requested limit.
 local function getSnapshotCacheKey(leaderboardId, limit)
 	return tostring(leaderboardId) .. ":" .. tostring(sanitizeTopCount(limit))
 end
 
--- Copies rows before returning cached snapshots to callers.
 local function copyRows(rows)
 	local result = {}
 	if type(rows) ~= "table" then
@@ -173,7 +200,6 @@ local function copyRows(rows)
 	return result
 end
 
--- Copies snapshot tables so callers cannot mutate cache state.
 local function copySnapshot(snapshot)
 	if type(snapshot) ~= "table" then
 		return nil
@@ -191,7 +217,6 @@ local function copySnapshot(snapshot)
 	}
 end
 
--- Clears cached snapshots for one leaderboard after writes succeed.
 local function clearSnapshotCache(leaderboardId)
 	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
 	if safeLeaderboardId == nil then
@@ -206,14 +231,39 @@ local function clearSnapshotCache(leaderboardId)
 	end
 end
 
--- Clears every cached snapshot when async player-name lookups resolve.
 local function clearAllSnapshotCache()
 	for cacheKey in pairs(snapshotCacheByKey) do
 		snapshotCacheByKey[cacheKey] = nil
 	end
 end
 
--- Checks Roblox DataStore budget, falling back to "try anyway" if the budget API errors.
+local function getFlushTimeout(timeoutSeconds)
+	local timeout = toFiniteNumber(timeoutSeconds)
+	if timeout == nil then
+		return 30
+	end
+
+	return math.max(0, timeout)
+end
+
+local function registerShutdownFlush()
+	if shutdownFlushRegistered then
+		return
+	end
+
+	shutdownFlushRegistered = true
+
+	game:BindToClose(function()
+		local success, err = pcall(function()
+			LeaderboardService.FlushPendingWrites(SHUTDOWN_FLUSH_SECONDS)
+		end)
+
+		if not success then
+			warn("LeaderboardService shutdown flush failed:", err)
+		end
+	end)
+end
+
 local function hasDataStoreBudget(requestType)
 	local success, budgetOrError = pcall(function()
 		return DataStoreService:GetRequestBudgetForRequestType(requestType)
@@ -227,7 +277,6 @@ local function hasDataStoreBudget(requestType)
 	return (tonumber(budgetOrError) or 0) > 0
 end
 
--- Creates or returns the OrderedDataStore configured for one leaderboard definition.
 local function getOrderedStore(definition)
 	if type(definition) ~= "table" then
 		return nil
@@ -256,7 +305,6 @@ local function getOrderedStore(definition)
 	return storeOrError
 end
 
--- Returns a display name for a user id, using online players and async lookup caching.
 local function getPlayerName(userId)
 	local safeUserId = sanitizeUserId(userId)
 	if safeUserId == nil then
@@ -302,7 +350,6 @@ local function getPlayerName(userId)
 	return "User_" .. tostring(safeUserId)
 end
 
--- Builds a sorted snapshot from memory when DataStore reads are unavailable.
 local function buildRowsFromMemory(leaderboardId, definition, limit)
 	local bucket = getMemoryBucket(leaderboardId)
 	local rows = {}
@@ -351,7 +398,6 @@ local function buildRowsFromMemory(leaderboardId, definition, limit)
 	return result
 end
 
--- Updates the in-memory fallback table immediately when the server submits a value.
 local function setMemoryValue(leaderboardId, userId, value, removeZeroValues)
 	local bucket = getMemoryBucket(leaderboardId)
 	if type(bucket) ~= "table" then
@@ -373,14 +419,12 @@ local function setMemoryValue(leaderboardId, userId, value, removeZeroValues)
 	bucket[safeUserId] = safeValue
 end
 
--- Returns the exponential backoff delay for a failed write attempt.
 local function getRetryDelay(attemptCount)
 	local safeAttemptCount = math.max(1, sanitizeWholeNumber(attemptCount))
 	local delay = WRITE_RETRY_BASE_SECONDS * (2 ^ math.min(safeAttemptCount - 1, 6))
 	return math.min(delay, WRITE_RETRY_MAX_SECONDS)
 end
 
--- Checks whether any leaderboard still has queued DataStore writes.
 local function hasPendingWrites()
 	for _, bucket in pairs(pendingWritesByLeaderboardId) do
 		if type(bucket) == "table" and next(bucket) ~= nil then
@@ -391,7 +435,6 @@ local function hasPendingWrites()
 	return false
 end
 
--- Attempts one queued write job and reports whether the job can be removed.
 local function processWriteJob(leaderboardId, userId, job, forceDue)
 	if type(job) ~= "table" then
 		return true
@@ -457,7 +500,6 @@ local function processWriteJob(leaderboardId, userId, job, forceDue)
 	return false
 end
 
--- Processes all queued write jobs once.
 local function processPendingWrites(forceDue)
 	for leaderboardId, bucket in pairs(pendingWritesByLeaderboardId) do
 		if type(bucket) == "table" then
@@ -476,7 +518,6 @@ local function processPendingWrites(forceDue)
 	end
 end
 
--- Starts the background write queue loop when queued writes exist.
 local function startWriteQueue()
 	if writeQueueRunning then
 		return
@@ -498,7 +539,6 @@ local function startWriteQueue()
 	end)
 end
 
--- Debounces and queues the server-authoritative value for one user.
 local function queueWrite(definition, userId, value)
 	local leaderboardId = definition.Id
 	local safeValue = sanitizeWholeNumber(value)
@@ -550,7 +590,6 @@ local function queueWrite(definition, userId, value)
 	return true, nil
 end
 
--- Initializes definition validation and memory buckets. Safe to call multiple times.
 function LeaderboardService.Init()
 	if isInitialized then
 		return true
@@ -566,20 +605,19 @@ function LeaderboardService.Init()
 	end
 
 	isInitialized = true
+	registerShutdownFlush()
+
 	return true
 end
 
--- Returns registered leaderboard ids in display/creation order.
 function LeaderboardService.GetRegisteredLeaderboardIds()
 	return LeaderboardDefinitions.GetRegisteredIds()
 end
 
--- Returns a safe copy of one leaderboard definition.
 function LeaderboardService.GetDefinition(leaderboardId)
 	return getDefinition(leaderboardId)
 end
 
--- Optional adapter helper for games that store stat values in state.Meta.
 function LeaderboardService.GetValueFromState(state, leaderboardId)
 	local definition = getDefinition(leaderboardId)
 	if type(definition) ~= "table" then
@@ -593,13 +631,10 @@ function LeaderboardService.GetValueFromState(state, leaderboardId)
 	return sanitizeWholeNumber(state.Meta[definition.MetaKey])
 end
 
--- Queues a trusted server-side leaderboard update.
 function LeaderboardService.SetPlayerValue(playerOrUserId, leaderboardId, value)
-	LeaderboardService.Init()
-
-	local definition = getDefinition(leaderboardId)
+	local definition, definitionReason = getPublicDefinition(leaderboardId)
 	if type(definition) ~= "table" then
-		return false, "UnknownLeaderboard"
+		return false, definitionReason
 	end
 
 	local userId = getUserIdFromPlayerOrUserId(playerOrUserId)
@@ -607,22 +642,30 @@ function LeaderboardService.SetPlayerValue(playerOrUserId, leaderboardId, value)
 		return false, "InvalidUserId"
 	end
 
-	local safeValue = sanitizeWholeNumber(value)
+	local safeValue = sanitizeSubmittedValue(value)
+	if safeValue == nil then
+		return false, "InvalidValue"
+	end
+
+	LeaderboardService.Init()
+
 	return queueWrite(definition, userId, safeValue)
 end
 
--- Optional adapter helper: reads one leaderboard value from state.Meta and submits it.
 function LeaderboardService.UpdatePlayerFromState(player, state, leaderboardId)
-	local definition = getDefinition(leaderboardId)
+	local definition, definitionReason = getPublicDefinition(leaderboardId)
 	if type(definition) ~= "table" then
-		return false, "UnknownLeaderboard"
+		return false, definitionReason
 	end
 
-	local value = LeaderboardService.GetValueFromState(state, definition.Id)
+	local value = 0
+	if type(state) == "table" and type(state.Meta) == "table" and state.Meta[definition.MetaKey] ~= nil then
+		value = state.Meta[definition.MetaKey]
+	end
+
 	return LeaderboardService.SetPlayerValue(player, definition.Id, value)
 end
 
--- Optional adapter helper: submits every configured leaderboard value from state.Meta.
 function LeaderboardService.UpdatePlayerFromStateAll(player, state)
 	LeaderboardService.Init()
 
@@ -639,18 +682,17 @@ function LeaderboardService.UpdatePlayerFromStateAll(player, state)
 	return results
 end
 
--- Builds a display-ready snapshot from DataStore, stale cache, memory, or an empty fallback.
 function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 	LeaderboardService.Init()
 
-	local definition = getDefinition(leaderboardId)
+	local definition, definitionReason = getPublicDefinition(leaderboardId)
 	if type(definition) ~= "table" then
 		return {
 			LeaderboardId = tostring(leaderboardId or ""),
 			DisplayName = tostring(leaderboardId or ""),
 			GeneratedAt = os.time(),
 			Rows = {},
-			Error = "UnknownLeaderboard",
+			Error = definitionReason,
 			Stale = false,
 			Source = "Unavailable",
 			Limit = 0,
@@ -761,11 +803,10 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 	}
 end
 
--- Attempts to write queued values before shutdown or manual validation.
 function LeaderboardService.FlushPendingWrites(timeoutSeconds)
 	LeaderboardService.Init()
 
-	local deadline = os.clock() + math.max(0, tonumber(timeoutSeconds) or 30)
+	local deadline = os.clock() + getFlushTimeout(timeoutSeconds)
 	while hasPendingWrites() and os.clock() < deadline do
 		processPendingWrites(true)
 

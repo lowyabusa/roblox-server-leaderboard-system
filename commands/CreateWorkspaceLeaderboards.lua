@@ -1,5 +1,14 @@
--- Paste this script into the Roblox Studio Command Bar after copying LeaderboardSystem
--- into ServerScriptService. It creates or updates Workspace.Leaderboards display parts.
+-- Roblox Studio Command Bar setup script.
+-- Copy src/ServerScriptService/LeaderboardSystem into ServerScriptService first,
+-- then paste and run this whole file in the Command Bar.
+--
+-- The script is idempotent: running it again updates existing boards and creates
+-- missing boards without duplicating boards for the same LeaderboardId.
+--
+-- Generated hierarchy:
+-- Workspace
+--   Leaderboards
+--     Leaderboard_<Id>
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
@@ -15,7 +24,6 @@ local BOARD_SPACING_STUDS = 15
 local DEFAULT_FACE = "Front"
 local DEFAULT_REFRESH_SECONDS = 120
 
--- getLeaderboardSystem locates the installed ModuleScript folder in ServerScriptService.
 local function getLeaderboardSystem()
 	local leaderboardSystem = ServerScriptService:FindFirstChild(LEADERBOARD_SYSTEM_NAME)
 	assert(leaderboardSystem ~= nil, "Copy src/ServerScriptService/LeaderboardSystem into ServerScriptService first.")
@@ -23,7 +31,6 @@ local function getLeaderboardSystem()
 	return leaderboardSystem
 end
 
--- getLeaderboardDefinitions requires the source-of-truth definitions module.
 local function getLeaderboardDefinitions(leaderboardSystem)
 	local definitionsModule = leaderboardSystem:FindFirstChild("LeaderboardDefinitions")
 	assert(definitionsModule ~= nil, "LeaderboardSystem is missing LeaderboardDefinitions.")
@@ -31,7 +38,6 @@ local function getLeaderboardDefinitions(leaderboardSystem)
 	return require(definitionsModule)
 end
 
--- getOrCreateFolder creates the Workspace container without touching unrelated objects.
 local function getOrCreateFolder()
 	local folder = Workspace:FindFirstChild(LEADERBOARDS_FOLDER_NAME)
 	if folder ~= nil then
@@ -46,12 +52,10 @@ local function getOrCreateFolder()
 	return folder
 end
 
--- getBoardName keeps generated part names stable and readable.
 local function getBoardName(definition)
 	return BOARD_NAME_PREFIX .. tostring(definition.Id)
 end
 
--- findExistingBoard prefers the stable generated name, then falls back to matching LeaderboardId.
 local function findExistingBoard(folder, definition)
 	local boardName = getBoardName(definition)
 	local namedChild = folder:FindFirstChild(boardName)
@@ -68,7 +72,6 @@ local function findExistingBoard(folder, definition)
 	return nil
 end
 
--- applyAttributes updates plug-and-play attributes every time the command is run.
 local function applyAttributes(part, definition)
 	part:SetAttribute("LeaderboardId", definition.Id)
 	part:SetAttribute("LeaderboardTitle", definition.DisplayName)
@@ -77,7 +80,6 @@ local function applyAttributes(part, definition)
 	part:SetAttribute("LeaderboardFace", DEFAULT_FACE)
 end
 
--- createBoardPart makes a new anchored display part and parents it last.
 local function createBoardPart(folder, definition, index)
 	local part = Instance.new("Part")
 	part.Name = getBoardName(definition)

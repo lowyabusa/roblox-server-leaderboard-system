@@ -1,5 +1,5 @@
--- Example server-only publisher. Put this Script in ServerScriptService, then replace
--- the session score logic with your own trusted game logic.
+-- Server Script example. Put this Script in ServerScriptService and replace the
+-- score increment with your own trusted server gameplay logic.
 
 local Players = game:GetService("Players")
 local ServerScriptService = game:GetService("ServerScriptService")
@@ -12,10 +12,9 @@ local LEADERBOARD_ID = "Score"
 local AWARD_INTERVAL_SECONDS = 30
 local SCORE_PER_INTERVAL = 10
 
--- sessionScores is server-owned state. Clients never send leaderboard values directly.
+-- This table is server-owned. Do not publish client-submitted leaderboard values.
 local sessionScoresByUserId = {}
 
--- publishScore writes the current trusted server value to the configured leaderboard.
 local function publishScore(player)
 	local score = sessionScoresByUserId[player.UserId] or 0
 	local success, reason = LeaderboardService.SetPlayerValue(player, LEADERBOARD_ID, score)
@@ -42,8 +41,4 @@ end)
 Players.PlayerRemoving:Connect(function(player)
 	publishScore(player)
 	sessionScoresByUserId[player.UserId] = nil
-end)
-
-game:BindToClose(function()
-	LeaderboardService.FlushPendingWrites(20)
 end)
