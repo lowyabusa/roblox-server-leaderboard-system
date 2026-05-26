@@ -1,0 +1,13 @@
+{
+  "name": "LeaderboardSystem",
+  "tree": {
+    "$className": "DataModel",
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "$ignoreUnknownInstances": true,
+      "LeaderboardSystem": {
+        "$path": "src/ServerScriptService/LeaderboardSystem"
+      }
+    }
+  }
+}
