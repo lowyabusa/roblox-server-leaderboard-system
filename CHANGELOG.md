@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0
+
+- Add explicit daily and weekly leaderboard periods.
+- Add `LeaderboardService.SetPlayerPeriodValue`.
+- Add `LeaderboardPeriod` display board support.
+- Generate configured period boards from the Command Bar setup script.
+- Document UTC reset behavior and period-owned server values.
+
 ## v0.1.0
 
 - Initial public release.

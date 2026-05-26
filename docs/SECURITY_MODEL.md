@@ -10,11 +10,15 @@ Only server code should call:
 
 ```lua
 LeaderboardService.SetPlayerValue(player, leaderboardId, value)
+LeaderboardService.SetPlayerPeriodValue(player, leaderboardId, period, value)
 ```
 
 The server should calculate the final value from trusted gameplay state. Examples
 include server-owned score, win count, level, clear time, or other values the
 server can verify.
+
+Daily and weekly boards do not make client values safer. The server must still
+calculate the final daily or weekly value before publishing it.
 
 ## Why Clients Must Not Publish Final Values
 
@@ -26,7 +30,7 @@ finishing a round. The server should validate the action, update server-owned
 state, and then publish the final value.
 
 Do not add a `RemoteEvent` or `RemoteFunction` that forwards a client-supplied
-leaderboard value into `SetPlayerValue`.
+leaderboard value into `SetPlayerValue` or `SetPlayerPeriodValue`.
 
 ## What This Protects Against
 
@@ -34,12 +38,13 @@ leaderboard value into `SetPlayerValue`.
 - Direct use of client-submitted final scores in `OrderedDataStore`.
 - Display boards becoming a write path.
 - Invalid submitted values such as unknown leaderboard ids, invalid users,
-  non-number values, `NaN`, and infinite values.
+  invalid periods, non-number values, `NaN`, and infinite values.
 
 ## What This Does Not Protect Against
 
 - Bugs in your server gameplay logic.
 - Server scripts that publish the wrong value.
+- Server scripts that publish lifetime values into daily or weekly stores.
 - Exploits in unrelated remotes in your game.
 - Economy, inventory, matchmaking, or anti-cheat problems.
 - DataStore outages, throttling, or Roblox platform behavior.
@@ -49,8 +54,8 @@ leaderboard value into `SetPlayerValue`.
 ```text
 Client request
   -> server validates gameplay action
-  -> server updates trusted stat
-  -> server calls LeaderboardService.SetPlayerValue(...)
+  -> server updates trusted all-time/daily/weekly stat
+  -> server calls LeaderboardService.SetPlayerValue(...) or SetPlayerPeriodValue(...)
 ```
 
 The important rule is that the client request is not the leaderboard value. The

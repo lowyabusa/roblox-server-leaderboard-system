@@ -8,6 +8,8 @@ local LeaderboardService = {}
 -- Default read sizes and cache/write timings keep DataStore traffic predictable.
 local DEFAULT_TOP_COUNT = 10
 local MAX_TOP_COUNT = 100
+local DEFAULT_PERIOD = LeaderboardDefinitions.GetDefaultPeriod()
+local SECONDS_PER_DAY = 24 * 60 * 60
 
 local SNAPSHOT_CACHE_SECONDS = 60
 local STALE_SNAPSHOT_CACHE_SECONDS = 300
@@ -24,17 +26,13 @@ local NAME_RETRY_SECONDS = 300
 local DATASTORE_READ_REQUEST_TYPE = Enum.DataStoreRequestType.GetSortedAsync
 local DATASTORE_WRITE_REQUEST_TYPE = Enum.DataStoreRequestType.SetIncrementSortedAsync
 
--- orderedStoresById caches OrderedDataStore handles by leaderboard id.
-local orderedStoresById = {}
+local orderedStoresByScopeKey = {}
 
--- memoryValuesByLeaderboardId keeps the latest server-submitted values available for fallback rendering.
-local memoryValuesByLeaderboardId = {}
+local memoryValuesByScopeKey = {}
 
--- lastSubmittedValuesByLeaderboardId prevents repeat writes for unchanged values.
-local lastSubmittedValuesByLeaderboardId = {}
+local lastSubmittedValuesByScopeKey = {}
 
--- pendingWritesByLeaderboardId is the debounced write queue keyed by leaderboard id and user id.
-local pendingWritesByLeaderboardId = {}
+local pendingWritesByScopeKey = {}
 
 -- snapshotCacheByKey stores recent DataStore snapshots so displays can refresh without over-reading.
 local snapshotCacheByKey = {}
@@ -96,6 +94,70 @@ local function getPublicDefinition(leaderboardId)
 	return definition, nil
 end
 
+local function getUtcDateKey(timestamp)
+	local utcDate = os.date("!*t", timestamp or os.time())
+	return string.format("%04d-%02d-%02d", utcDate.year, utcDate.month, utcDate.day)
+end
+
+local function getUtcWeekKey(timestamp)
+	local safeTimestamp = timestamp or os.time()
+	local utcDate = os.date("!*t", safeTimestamp)
+	local daysSinceMonday = (utcDate.wday + 5) % 7
+	return getUtcDateKey(safeTimestamp - (daysSinceMonday * SECONDS_PER_DAY))
+end
+
+local function getPeriodStoreName(definition, period, timestamp)
+	if period == "AllTime" then
+		return definition.DataStoreName, nil
+	end
+
+	if period == "Daily" then
+		local periodKey = getUtcDateKey(timestamp)
+		return definition.DataStoreName .. "_Daily_" .. periodKey, periodKey
+	end
+
+	if period == "Weekly" then
+		local periodKey = getUtcWeekKey(timestamp)
+		return definition.DataStoreName .. "_Weekly_" .. periodKey, periodKey
+	end
+
+	return nil, nil
+end
+
+local function getScopeForDefinition(definition, period, timestamp)
+	local safePeriod = LeaderboardDefinitions.NormalizePeriod(period)
+	if safePeriod == nil or not LeaderboardDefinitions.DefinitionHasPeriod(definition, safePeriod) then
+		return nil, "InvalidPeriod"
+	end
+
+	local storeName, periodKey = getPeriodStoreName(definition, safePeriod, timestamp)
+	if type(storeName) ~= "string" or storeName == "" then
+		return nil, "InvalidPeriod"
+	end
+
+	return {
+		LeaderboardId = definition.Id,
+		Period = safePeriod,
+		PeriodKey = periodKey,
+		StoreName = storeName,
+		ScopeKey = definition.Id .. "|" .. safePeriod .. "|" .. storeName,
+	}, nil
+end
+
+local function getPublicScope(leaderboardId, period, timestamp)
+	local definition, definitionReason = getPublicDefinition(leaderboardId)
+	if type(definition) ~= "table" then
+		return nil, definitionReason, nil
+	end
+
+	local scope, scopeReason = getScopeForDefinition(definition, period, timestamp)
+	if type(scope) ~= "table" then
+		return nil, scopeReason, definition
+	end
+
+	return scope, nil, definition
+end
+
 local function sanitizeTopCount(value, fallback)
 	return LeaderboardDefinitions.NormalizeTopCount(value, fallback or DEFAULT_TOP_COUNT, MAX_TOP_COUNT)
 end
@@ -131,53 +193,50 @@ local function getDefinition(leaderboardId)
 	return LeaderboardDefinitions.GetDefinition(safeLeaderboardId)
 end
 
-local function getMemoryBucket(leaderboardId)
-	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
-	if safeLeaderboardId == nil then
+local function getMemoryBucket(scopeKey)
+	if type(scopeKey) ~= "string" or scopeKey == "" then
 		return nil
 	end
 
-	local bucket = memoryValuesByLeaderboardId[safeLeaderboardId]
+	local bucket = memoryValuesByScopeKey[scopeKey]
 	if type(bucket) ~= "table" then
 		bucket = {}
-		memoryValuesByLeaderboardId[safeLeaderboardId] = bucket
+		memoryValuesByScopeKey[scopeKey] = bucket
 	end
 
 	return bucket
 end
 
-local function getLastSubmittedBucket(leaderboardId)
-	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
-	if safeLeaderboardId == nil then
+local function getLastSubmittedBucket(scopeKey)
+	if type(scopeKey) ~= "string" or scopeKey == "" then
 		return nil
 	end
 
-	local bucket = lastSubmittedValuesByLeaderboardId[safeLeaderboardId]
+	local bucket = lastSubmittedValuesByScopeKey[scopeKey]
 	if type(bucket) ~= "table" then
 		bucket = {}
-		lastSubmittedValuesByLeaderboardId[safeLeaderboardId] = bucket
+		lastSubmittedValuesByScopeKey[scopeKey] = bucket
 	end
 
 	return bucket
 end
 
-local function getPendingWriteBucket(leaderboardId)
-	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
-	if safeLeaderboardId == nil then
+local function getPendingWriteBucket(scopeKey)
+	if type(scopeKey) ~= "string" or scopeKey == "" then
 		return nil
 	end
 
-	local bucket = pendingWritesByLeaderboardId[safeLeaderboardId]
+	local bucket = pendingWritesByScopeKey[scopeKey]
 	if type(bucket) ~= "table" then
 		bucket = {}
-		pendingWritesByLeaderboardId[safeLeaderboardId] = bucket
+		pendingWritesByScopeKey[scopeKey] = bucket
 	end
 
 	return bucket
 end
 
-local function getSnapshotCacheKey(leaderboardId, limit)
-	return tostring(leaderboardId) .. ":" .. tostring(sanitizeTopCount(limit))
+local function getSnapshotCacheKey(scopeKey, limit)
+	return tostring(scopeKey) .. ":" .. tostring(sanitizeTopCount(limit))
 end
 
 local function copyRows(rows)
@@ -207,6 +266,8 @@ local function copySnapshot(snapshot)
 
 	return {
 		LeaderboardId = snapshot.LeaderboardId,
+		Period = snapshot.Period,
+		PeriodKey = snapshot.PeriodKey,
 		DisplayName = snapshot.DisplayName,
 		GeneratedAt = snapshot.GeneratedAt,
 		Rows = copyRows(snapshot.Rows),
@@ -217,13 +278,12 @@ local function copySnapshot(snapshot)
 	}
 end
 
-local function clearSnapshotCache(leaderboardId)
-	local safeLeaderboardId = sanitizeLeaderboardId(leaderboardId)
-	if safeLeaderboardId == nil then
+local function clearSnapshotCache(scopeKey)
+	if type(scopeKey) ~= "string" or scopeKey == "" then
 		return
 	end
 
-	local prefix = safeLeaderboardId .. ":"
+	local prefix = scopeKey .. ":"
 	for cacheKey in pairs(snapshotCacheByKey) do
 		if string.sub(cacheKey, 1, #prefix) == prefix then
 			snapshotCacheByKey[cacheKey] = nil
@@ -277,31 +337,32 @@ local function hasDataStoreBudget(requestType)
 	return (tonumber(budgetOrError) or 0) > 0
 end
 
-local function getOrderedStore(definition)
-	if type(definition) ~= "table" then
+local function getOrderedStore(scope)
+	if type(scope) ~= "table" then
 		return nil
 	end
 
-	local leaderboardId = definition.Id
-	if type(leaderboardId) ~= "string" or leaderboardId == "" then
+	local scopeKey = scope.ScopeKey
+	local storeName = scope.StoreName
+	if type(scopeKey) ~= "string" or scopeKey == "" or type(storeName) ~= "string" or storeName == "" then
 		return nil
 	end
 
-	local existingStore = orderedStoresById[leaderboardId]
+	local existingStore = orderedStoresByScopeKey[scopeKey]
 	if existingStore ~= nil then
 		return existingStore
 	end
 
 	local success, storeOrError = pcall(function()
-		return DataStoreService:GetOrderedDataStore(definition.DataStoreName)
+		return DataStoreService:GetOrderedDataStore(storeName)
 	end)
 
 	if not success then
-		warn("LeaderboardService GetOrderedDataStore failed:", leaderboardId, storeOrError)
+		warn("LeaderboardService GetOrderedDataStore failed:", scope.LeaderboardId, scope.Period, storeOrError)
 		return nil
 	end
 
-	orderedStoresById[leaderboardId] = storeOrError
+	orderedStoresByScopeKey[scopeKey] = storeOrError
 	return storeOrError
 end
 
@@ -350,8 +411,8 @@ local function getPlayerName(userId)
 	return "User_" .. tostring(safeUserId)
 end
 
-local function buildRowsFromMemory(leaderboardId, definition, limit)
-	local bucket = getMemoryBucket(leaderboardId)
+local function buildRowsFromMemory(scopeKey, definition, limit)
+	local bucket = getMemoryBucket(scopeKey)
 	local rows = {}
 
 	if type(bucket) ~= "table" or type(definition) ~= "table" then
@@ -398,8 +459,8 @@ local function buildRowsFromMemory(leaderboardId, definition, limit)
 	return result
 end
 
-local function setMemoryValue(leaderboardId, userId, value, removeZeroValues)
-	local bucket = getMemoryBucket(leaderboardId)
+local function setMemoryValue(scopeKey, userId, value, removeZeroValues)
+	local bucket = getMemoryBucket(scopeKey)
 	if type(bucket) ~= "table" then
 		return
 	end
@@ -426,7 +487,7 @@ local function getRetryDelay(attemptCount)
 end
 
 local function hasPendingWrites()
-	for _, bucket in pairs(pendingWritesByLeaderboardId) do
+	for _, bucket in pairs(pendingWritesByScopeKey) do
 		if type(bucket) == "table" and next(bucket) ~= nil then
 			return true
 		end
@@ -435,7 +496,7 @@ local function hasPendingWrites()
 	return false
 end
 
-local function processWriteJob(leaderboardId, userId, job, forceDue)
+local function processWriteJob(scopeKey, userId, job, forceDue)
 	if type(job) ~= "table" then
 		return true
 	end
@@ -457,11 +518,11 @@ local function processWriteJob(leaderboardId, userId, job, forceDue)
 
 	job.InFlight = true
 	local writeVersion = sanitizeWholeNumber(job.Version)
-	local definition = job.Definition
+	local scope = job.Scope
 	local safeValue = sanitizeWholeNumber(job.Value)
 	local removeZeroValues = job.RemoveZeroValues == true
 	local key = tostring(userId)
-	local store = getOrderedStore(definition)
+	local store = getOrderedStore(scope)
 	if not store then
 		if sanitizeWholeNumber(job.Version) == writeVersion then
 			job.AttemptCount = sanitizeWholeNumber(job.AttemptCount) + 1
@@ -482,8 +543,8 @@ local function processWriteJob(leaderboardId, userId, job, forceDue)
 	end)
 
 	if success then
-		setMemoryValue(leaderboardId, userId, safeValue, removeZeroValues)
-		clearSnapshotCache(leaderboardId)
+		setMemoryValue(scopeKey, userId, safeValue, removeZeroValues)
+		clearSnapshotCache(scopeKey)
 		job.InFlight = false
 
 		return sanitizeWholeNumber(job.Version) == writeVersion
@@ -496,24 +557,24 @@ local function processWriteJob(leaderboardId, userId, job, forceDue)
 	end
 
 	job.InFlight = false
-	warn("LeaderboardService write failed:", leaderboardId, userId, err)
+	warn("LeaderboardService write failed:", scopeKey, userId, err)
 	return false
 end
 
 local function processPendingWrites(forceDue)
-	for leaderboardId, bucket in pairs(pendingWritesByLeaderboardId) do
+	for scopeKey, bucket in pairs(pendingWritesByScopeKey) do
 		if type(bucket) == "table" then
 			for userId, job in pairs(bucket) do
-				if processWriteJob(leaderboardId, userId, job, forceDue) then
+				if processWriteJob(scopeKey, userId, job, forceDue) then
 					bucket[userId] = nil
 				end
 			end
 
 			if next(bucket) == nil then
-				pendingWritesByLeaderboardId[leaderboardId] = nil
+				pendingWritesByScopeKey[scopeKey] = nil
 			end
 		else
-			pendingWritesByLeaderboardId[leaderboardId] = nil
+			pendingWritesByScopeKey[scopeKey] = nil
 		end
 	end
 end
@@ -539,19 +600,19 @@ local function startWriteQueue()
 	end)
 end
 
-local function queueWrite(definition, userId, value)
-	local leaderboardId = definition.Id
+local function queueWrite(definition, scope, userId, value)
+	local scopeKey = scope.ScopeKey
 	local safeValue = sanitizeWholeNumber(value)
 	local removeZeroValues = definition.RemoveZeroValues == true
 
-	setMemoryValue(leaderboardId, userId, safeValue, removeZeroValues)
+	setMemoryValue(scopeKey, userId, safeValue, removeZeroValues)
 
-	local pendingBucket = getPendingWriteBucket(leaderboardId)
+	local pendingBucket = getPendingWriteBucket(scopeKey)
 	if type(pendingBucket) ~= "table" then
 		return false, "InvalidLeaderboard"
 	end
 
-	local submittedBucket = getLastSubmittedBucket(leaderboardId)
+	local submittedBucket = getLastSubmittedBucket(scopeKey)
 	if type(submittedBucket) == "table" and pendingBucket[userId] == nil and submittedBucket[userId] == safeValue then
 		return true, nil
 	end
@@ -568,6 +629,7 @@ local function queueWrite(definition, userId, value)
 
 	if type(existingJob) == "table" then
 		existingJob.Definition = definition
+		existingJob.Scope = scope
 		existingJob.Value = safeValue
 		existingJob.RemoveZeroValues = removeZeroValues
 		existingJob.AttemptCount = 0
@@ -577,6 +639,7 @@ local function queueWrite(definition, userId, value)
 	else
 		pendingBucket[userId] = {
 			Definition = definition,
+			Scope = scope,
 			Value = safeValue,
 			RemoveZeroValues = removeZeroValues,
 			AttemptCount = 0,
@@ -601,7 +664,12 @@ function LeaderboardService.Init()
 	end
 
 	for _, definition in ipairs(LeaderboardDefinitions.GetOrderedDefinitions()) do
-		getMemoryBucket(definition.Id)
+		for _, period in ipairs(definition.Periods) do
+			local scope = getScopeForDefinition(definition, period, os.time())
+			if type(scope) == "table" then
+				getMemoryBucket(scope.ScopeKey)
+			end
+		end
 	end
 
 	isInitialized = true
@@ -618,6 +686,24 @@ function LeaderboardService.GetDefinition(leaderboardId)
 	return getDefinition(leaderboardId)
 end
 
+function LeaderboardService.GetDefaultPeriod()
+	return DEFAULT_PERIOD
+end
+
+function LeaderboardService.NormalizePeriod(period, fallbackPeriod)
+	return LeaderboardDefinitions.NormalizePeriod(period, fallbackPeriod)
+end
+
+function LeaderboardService.IsLeaderboardPeriodEnabled(leaderboardId, period)
+	local definition = getDefinition(leaderboardId)
+	if type(definition) ~= "table" then
+		return false
+	end
+
+	local safePeriod = LeaderboardDefinitions.NormalizePeriod(period)
+	return LeaderboardDefinitions.DefinitionHasPeriod(definition, safePeriod)
+end
+
 function LeaderboardService.GetValueFromState(state, leaderboardId)
 	local definition = getDefinition(leaderboardId)
 	if type(definition) ~= "table" then
@@ -632,9 +718,13 @@ function LeaderboardService.GetValueFromState(state, leaderboardId)
 end
 
 function LeaderboardService.SetPlayerValue(playerOrUserId, leaderboardId, value)
-	local definition, definitionReason = getPublicDefinition(leaderboardId)
-	if type(definition) ~= "table" then
-		return false, definitionReason
+	return LeaderboardService.SetPlayerPeriodValue(playerOrUserId, leaderboardId, DEFAULT_PERIOD, value)
+end
+
+function LeaderboardService.SetPlayerPeriodValue(playerOrUserId, leaderboardId, period, value)
+	local scope, scopeReason, definition = getPublicScope(leaderboardId, period, os.time())
+	if type(scope) ~= "table" then
+		return false, scopeReason
 	end
 
 	local userId = getUserIdFromPlayerOrUserId(playerOrUserId)
@@ -649,7 +739,7 @@ function LeaderboardService.SetPlayerValue(playerOrUserId, leaderboardId, value)
 
 	LeaderboardService.Init()
 
-	return queueWrite(definition, userId, safeValue)
+	return queueWrite(definition, scope, userId, safeValue)
 end
 
 function LeaderboardService.UpdatePlayerFromState(player, state, leaderboardId)
@@ -682,17 +772,19 @@ function LeaderboardService.UpdatePlayerFromStateAll(player, state)
 	return results
 end
 
-function LeaderboardService.BuildSnapshot(leaderboardId, limit)
+function LeaderboardService.BuildPeriodSnapshot(leaderboardId, period, limit)
 	LeaderboardService.Init()
 
-	local definition, definitionReason = getPublicDefinition(leaderboardId)
-	if type(definition) ~= "table" then
+	local scope, scopeReason, definition = getPublicScope(leaderboardId, period, os.time())
+	if type(scope) ~= "table" then
 		return {
 			LeaderboardId = tostring(leaderboardId or ""),
+			Period = tostring(period or ""),
+			PeriodKey = nil,
 			DisplayName = tostring(leaderboardId or ""),
 			GeneratedAt = os.time(),
 			Rows = {},
-			Error = definitionReason,
+			Error = scopeReason,
 			Stale = false,
 			Source = "Unavailable",
 			Limit = 0,
@@ -700,7 +792,7 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 	end
 
 	local safeLimit = sanitizeTopCount(limit, definition.TopCount)
-	local cacheKey = getSnapshotCacheKey(definition.Id, safeLimit)
+	local cacheKey = getSnapshotCacheKey(scope.ScopeKey, safeLimit)
 	local now = os.clock()
 	local cachedSnapshotEntry = snapshotCacheByKey[cacheKey]
 
@@ -708,7 +800,7 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 		return copySnapshot(cachedSnapshotEntry.Snapshot)
 	end
 
-	local store = getOrderedStore(definition)
+	local store = getOrderedStore(scope)
 	local rows = nil
 	local errorReason = nil
 
@@ -737,7 +829,7 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 				end
 			else
 				errorReason = "ReadFailed"
-				warn("LeaderboardService BuildSnapshot failed:", definition.Id, pagesOrError)
+				warn("LeaderboardService BuildPeriodSnapshot failed:", definition.Id, scope.Period, pagesOrError)
 			end
 		else
 			errorReason = "ReadBudgetUnavailable"
@@ -749,6 +841,8 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 	if rows ~= nil then
 		local snapshot = {
 			LeaderboardId = definition.Id,
+			Period = scope.Period,
+			PeriodKey = scope.PeriodKey,
 			DisplayName = definition.DisplayName,
 			GeneratedAt = os.time(),
 			Rows = rows,
@@ -777,10 +871,12 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 		end
 	end
 
-	local memoryRows = buildRowsFromMemory(definition.Id, definition, safeLimit)
+	local memoryRows = buildRowsFromMemory(scope.ScopeKey, definition, safeLimit)
 	if #memoryRows > 0 then
 		return {
 			LeaderboardId = definition.Id,
+			Period = scope.Period,
+			PeriodKey = scope.PeriodKey,
 			DisplayName = definition.DisplayName,
 			GeneratedAt = os.time(),
 			Rows = memoryRows,
@@ -793,6 +889,8 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 
 	return {
 		LeaderboardId = definition.Id,
+		Period = scope.Period,
+		PeriodKey = scope.PeriodKey,
 		DisplayName = definition.DisplayName,
 		GeneratedAt = os.time(),
 		Rows = {},
@@ -801,6 +899,10 @@ function LeaderboardService.BuildSnapshot(leaderboardId, limit)
 		Source = "Unavailable",
 		Limit = safeLimit,
 	}
+end
+
+function LeaderboardService.BuildSnapshot(leaderboardId, limit)
+	return LeaderboardService.BuildPeriodSnapshot(leaderboardId, DEFAULT_PERIOD, limit)
 end
 
 function LeaderboardService.FlushPendingWrites(timeoutSeconds)

@@ -9,6 +9,8 @@
 -- Workspace
 --   Leaderboards
 --     Leaderboard_<Id>
+--     Leaderboard_<Id>_Daily
+--     Leaderboard_<Id>_Weekly
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
@@ -23,6 +25,8 @@ local BOARD_SPACING_STUDS = 15
 
 local DEFAULT_FACE = "Front"
 local DEFAULT_REFRESH_SECONDS = 120
+
+local defaultPeriod = "AllTime"
 
 local function getLeaderboardSystem()
 	local leaderboardSystem = ServerScriptService:FindFirstChild(LEADERBOARD_SYSTEM_NAME)
@@ -52,19 +56,72 @@ local function getOrCreateFolder()
 	return folder
 end
 
-local function getBoardName(definition)
-	return BOARD_NAME_PREFIX .. tostring(definition.Id)
+local function getDefinitionPeriods(definition)
+	if type(definition.Periods) ~= "table" then
+		return { defaultPeriod }
+	end
+
+	return definition.Periods
 end
 
-local function findExistingBoard(folder, definition)
-	local boardName = getBoardName(definition)
+local function getDefaultPeriod(definitionsApi)
+	if type(definitionsApi.GetDefaultPeriod) == "function" then
+		return definitionsApi.GetDefaultPeriod()
+	end
+
+	return defaultPeriod
+end
+
+local function getPeriodLabel(definitionsApi, period)
+	if type(definitionsApi.GetPeriodLabel) == "function" then
+		return definitionsApi.GetPeriodLabel(period)
+	end
+
+	if period == "AllTime" then
+		return "All Time"
+	end
+
+	return tostring(period)
+end
+
+local function getBoardName(definition, period)
+	local baseName = BOARD_NAME_PREFIX .. tostring(definition.Id)
+	if period == defaultPeriod then
+		return baseName
+	end
+
+	return baseName .. "_" .. period
+end
+
+local function getBoardTitle(definitionsApi, definition, period)
+	if period == defaultPeriod then
+		return definition.DisplayName
+	end
+
+	return definition.DisplayName .. " - " .. getPeriodLabel(definitionsApi, period)
+end
+
+local function getPartPeriod(part)
+	local period = part:GetAttribute("LeaderboardPeriod")
+	if type(period) ~= "string" or period == "" then
+		return defaultPeriod
+	end
+
+	return period
+end
+
+local function findExistingBoard(folder, definition, period)
+	local boardName = getBoardName(definition, period)
 	local namedChild = folder:FindFirstChild(boardName)
 	if namedChild ~= nil and namedChild:IsA("BasePart") then
 		return namedChild
 	end
 
 	for _, descendant in ipairs(folder:GetDescendants()) do
-		if descendant:IsA("BasePart") and descendant:GetAttribute("LeaderboardId") == definition.Id then
+		if descendant:IsA("BasePart")
+			and descendant:GetAttribute("LeaderboardId") == definition.Id
+			and getPartPeriod(descendant) == period
+		then
 			return descendant
 		end
 	end
@@ -72,24 +129,25 @@ local function findExistingBoard(folder, definition)
 	return nil
 end
 
-local function applyAttributes(part, definition)
+local function applyAttributes(part, definitionsApi, definition, period)
 	part:SetAttribute("LeaderboardId", definition.Id)
-	part:SetAttribute("LeaderboardTitle", definition.DisplayName)
+	part:SetAttribute("LeaderboardPeriod", period)
+	part:SetAttribute("LeaderboardTitle", getBoardTitle(definitionsApi, definition, period))
 	part:SetAttribute("LeaderboardTopCount", definition.TopCount)
 	part:SetAttribute("LeaderboardRefreshSeconds", DEFAULT_REFRESH_SECONDS)
 	part:SetAttribute("LeaderboardFace", DEFAULT_FACE)
 end
 
-local function createBoardPart(folder, definition, index)
+local function createBoardPart(folder, definitionsApi, definition, period, index)
 	local part = Instance.new("Part")
-	part.Name = getBoardName(definition)
+	part.Name = getBoardName(definition, period)
 	part.Anchored = true
 	part.CanCollide = true
 	part.Material = Enum.Material.SmoothPlastic
 	part.Color = Color3.fromRGB(24, 32, 62)
 	part.Size = BOARD_SIZE
 	part.Position = BOARD_START_POSITION + Vector3.new((index - 1) * BOARD_SPACING_STUDS, 0, 0)
-	applyAttributes(part, definition)
+	applyAttributes(part, definitionsApi, definition, period)
 	part.Parent = folder
 
 	return part
@@ -97,6 +155,7 @@ end
 
 local leaderboardSystem = getLeaderboardSystem()
 local LeaderboardDefinitions = getLeaderboardDefinitions(leaderboardSystem)
+defaultPeriod = getDefaultPeriod(LeaderboardDefinitions)
 
 local definitionsValid, reason = LeaderboardDefinitions.ValidateAll()
 assert(definitionsValid, "Leaderboard definitions are invalid: " .. tostring(reason))
@@ -104,17 +163,27 @@ assert(definitionsValid, "Leaderboard definitions are invalid: " .. tostring(rea
 local folder = getOrCreateFolder()
 local createdCount = 0
 local updatedCount = 0
+local nextCreateIndex = 1
 
-for index, definition in ipairs(LeaderboardDefinitions.GetOrderedDefinitions()) do
-	local part = findExistingBoard(folder, definition)
-	if part == nil then
-		part = createBoardPart(folder, definition, index)
-		createdCount += 1
-	else
-		updatedCount += 1
+for _, descendant in ipairs(folder:GetDescendants()) do
+	if descendant:IsA("BasePart") then
+		nextCreateIndex += 1
 	end
+end
 
-	applyAttributes(part, definition)
+for _, definition in ipairs(LeaderboardDefinitions.GetOrderedDefinitions()) do
+	for _, period in ipairs(getDefinitionPeriods(definition)) do
+		local part = findExistingBoard(folder, definition, period)
+		if part == nil then
+			part = createBoardPart(folder, LeaderboardDefinitions, definition, period, nextCreateIndex)
+			nextCreateIndex += 1
+			createdCount += 1
+		else
+			updatedCount += 1
+		end
+
+		applyAttributes(part, LeaderboardDefinitions, definition, period)
+	end
 end
 
 print(

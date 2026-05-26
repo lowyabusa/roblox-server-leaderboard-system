@@ -2,6 +2,19 @@ local LeaderboardDefinitions = {}
 
 local MIN_TOP_COUNT = 1
 local MAX_TOP_COUNT = 100
+local DEFAULT_PERIOD = "AllTime"
+
+local SUPPORTED_PERIODS = {
+	AllTime = true,
+	Daily = true,
+	Weekly = true,
+}
+
+local PERIOD_LABELS = {
+	AllTime = "All Time",
+	Daily = "Daily",
+	Weekly = "Weekly",
+}
 
 -- Add or remove leaderboards here, then keep ORDER in the display order you want.
 -- DataStoreName values are samples. Replace them with names owned by your game before publishing.
@@ -11,6 +24,7 @@ local DEFINITIONS_BY_ID = {
 		DisplayName = "Top Score",
 		MetaKey = "Score",
 		DataStoreName = "GenericLeaderboard_Score",
+		Periods = { "AllTime", "Daily", "Weekly" },
 		SortAscending = false,
 		TopCount = 10,
 		RemoveZeroValues = true,
@@ -21,6 +35,7 @@ local DEFINITIONS_BY_ID = {
 		DisplayName = "Most Wins",
 		MetaKey = "Wins",
 		DataStoreName = "GenericLeaderboard_Wins",
+		Periods = { "AllTime", "Daily", "Weekly" },
 		SortAscending = false,
 		TopCount = 10,
 		RemoveZeroValues = true,
@@ -31,6 +46,7 @@ local DEFINITIONS_BY_ID = {
 		DisplayName = "Highest Level",
 		MetaKey = "Level",
 		DataStoreName = "GenericLeaderboard_Level",
+		Periods = { "AllTime", "Daily", "Weekly" },
 		SortAscending = false,
 		TopCount = 10,
 		RemoveZeroValues = true,
@@ -48,7 +64,18 @@ local function copyDefinition(definition)
 		return nil
 	end
 
-	return table.clone(definition)
+	local result = table.clone(definition)
+	result.Periods = {}
+
+	if type(definition.Periods) == "table" then
+		for _, period in ipairs(definition.Periods) do
+			result.Periods[#result.Periods + 1] = period
+		end
+	else
+		result.Periods[1] = DEFAULT_PERIOD
+	end
+
+	return result
 end
 
 local function sanitizeLeaderboardId(leaderboardId)
@@ -77,6 +104,37 @@ local function normalizeWholeNumber(value)
 	return math.max(0, math.floor(numberValue))
 end
 
+local function isSupportedPeriod(period)
+	return type(period) == "string" and SUPPORTED_PERIODS[period] == true
+end
+
+local function getDefinitionPeriods(definition)
+	if type(definition) ~= "table" or type(definition.Periods) ~= "table" then
+		return { DEFAULT_PERIOD }
+	end
+
+	local result = {}
+	for _, period in ipairs(definition.Periods) do
+		result[#result + 1] = period
+	end
+
+	return result
+end
+
+local function definitionHasPeriod(definition, period)
+	if not isSupportedPeriod(period) then
+		return false
+	end
+
+	for _, configuredPeriod in ipairs(getDefinitionPeriods(definition)) do
+		if configuredPeriod == period then
+			return true
+		end
+	end
+
+	return false
+end
+
 function LeaderboardDefinitions.NormalizeTopCount(value, fallback, maxCount)
 	local safeMaxCount = normalizeWholeNumber(maxCount)
 	if safeMaxCount <= 0 or safeMaxCount > MAX_TOP_COUNT then
@@ -92,6 +150,38 @@ function LeaderboardDefinitions.NormalizeTopCount(value, fallback, maxCount)
 	end
 
 	return math.min(math.max(safeValue, MIN_TOP_COUNT), safeMaxCount)
+end
+
+function LeaderboardDefinitions.GetDefaultPeriod()
+	return DEFAULT_PERIOD
+end
+
+function LeaderboardDefinitions.NormalizePeriod(period, fallbackPeriod)
+	if isSupportedPeriod(period) then
+		return period
+	end
+
+	if isSupportedPeriod(fallbackPeriod) then
+		return fallbackPeriod
+	end
+
+	return nil
+end
+
+function LeaderboardDefinitions.IsSupportedPeriod(period)
+	return isSupportedPeriod(period)
+end
+
+function LeaderboardDefinitions.GetPeriodLabel(period)
+	if not isSupportedPeriod(period) then
+		return tostring(period or "")
+	end
+
+	return PERIOD_LABELS[period] or period
+end
+
+function LeaderboardDefinitions.DefinitionHasPeriod(definition, period)
+	return definitionHasPeriod(definition, period)
 end
 
 function LeaderboardDefinitions.GetDefinition(leaderboardId)
@@ -162,6 +252,25 @@ function LeaderboardDefinitions.ValidateDefinition(definition)
 
 	if type(definition.DataStoreName) ~= "string" or definition.DataStoreName == "" then
 		return false, "MissingDataStoreName"
+	end
+
+	if definition.Periods ~= nil then
+		if type(definition.Periods) ~= "table" or #definition.Periods <= 0 then
+			return false, "InvalidPeriods"
+		end
+
+		local seenPeriods = {}
+		for _, period in ipairs(definition.Periods) do
+			if not isSupportedPeriod(period) then
+				return false, "InvalidPeriod"
+			end
+
+			if seenPeriods[period] then
+				return false, "DuplicatePeriod"
+			end
+
+			seenPeriods[period] = true
+		end
 	end
 
 	if type(definition.SortAscending) ~= "boolean" then

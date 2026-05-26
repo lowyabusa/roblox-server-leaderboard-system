@@ -2,8 +2,9 @@
 
 A small copy-and-paste leaderboard system for Roblox games.
 
-It uses trusted server code to publish leaderboard values, `OrderedDataStore` for
-global ranking, and world display boards under `Workspace.Leaderboards`.
+It uses trusted server code to publish all-time, daily, and weekly leaderboard
+values, `OrderedDataStore` for global ranking, and world display boards under
+`Workspace.Leaderboards`.
 
 ## What This Is
 
@@ -13,6 +14,12 @@ point is:
 
 ```lua
 LeaderboardService.SetPlayerValue(player, leaderboardId, value)
+```
+
+Daily and weekly values use an explicit period-aware API:
+
+```lua
+LeaderboardService.SetPlayerPeriodValue(player, leaderboardId, period, value)
 ```
 
 Optional adapter helpers are included for games that already store stats in
@@ -38,7 +45,8 @@ service.
 
 ```text
 Server gameplay code
-  -> LeaderboardService.SetPlayerValue(...)
+  -> LeaderboardService.SetPlayerValue(...) or SetPlayerPeriodValue(...)
+  -> period scope (AllTime, Daily, Weekly)
   -> debounced write queue and in-memory fallback cache
   -> OrderedDataStore
   -> LeaderboardDisplayService
@@ -50,8 +58,8 @@ Main files:
 | File | Responsibility |
 | --- | --- |
 | `Bootstrap.server.lua` | Starts display discovery when the server script runs. |
-| `LeaderboardDefinitions.lua` | Defines leaderboard ids, titles, store names, and display order. |
-| `LeaderboardService.lua` | Validates server values, queues writes, reads rankings, and caches fallbacks. |
+| `LeaderboardDefinitions.lua` | Defines leaderboard ids, titles, store names, enabled periods, and display order. |
+| `LeaderboardService.lua` | Validates server values, resolves period scopes, queues writes, reads rankings, and caches fallbacks. |
 | `LeaderboardDisplayService.lua` | Finds board parts and renders generated `SurfaceGui` content. |
 | `commands/CreateWorkspaceLeaderboards.lua` | Command Bar setup script for world boards. |
 | `examples/ExampleStatPublisher.server.lua` | Minimal server-only publishing example. |
@@ -104,6 +112,7 @@ same file aligned with the ids you want to create and display.
 | `DisplayName` | Default board title. |
 | `MetaKey` | Key used by the optional `UpdatePlayerFromState` helpers. |
 | `DataStoreName` | `OrderedDataStore` name. The included names are samples. |
+| `Periods` | Optional list of enabled periods: `AllTime`, `Daily`, `Weekly`. |
 | `SortAscending` | `false` means highest value ranks first. |
 | `TopCount` | Default row count for generated boards and reads. |
 | `RemoveZeroValues` | Removes zero values from the `OrderedDataStore` when true. |
@@ -132,9 +141,41 @@ end
 leaderboard id, and a finite number. Invalid ids, invalid users, non-number
 values, `NaN`, and infinite values return `false` plus a reason string.
 
+Publish daily or weekly values explicitly:
+
+```lua
+local allTimeWins = 42
+local dailyWins = 3
+local weeklyWins = 8
+
+LeaderboardService.SetPlayerValue(player, "Wins", allTimeWins)
+LeaderboardService.SetPlayerPeriodValue(player, "Wins", "Daily", dailyWins)
+LeaderboardService.SetPlayerPeriodValue(player, "Wins", "Weekly", weeklyWins)
+```
+
+The library rotates the DataStore used by daily and weekly boards. Your server
+still owns the values. If you publish lifetime wins to a daily board, today's
+daily store will rank lifetime wins.
+
 Do not create a `RemoteEvent` that forwards client-submitted values into
-`SetPlayerValue`. If a client requests an action, validate the action on the
-server and publish the server-owned result.
+`SetPlayerValue` or `SetPlayerPeriodValue`. If a client requests an action,
+validate the action on the server and publish the server-owned result.
+
+## Daily and Weekly Boards
+
+Daily and weekly resets are implemented by changing the `OrderedDataStore` name
+used for the current UTC period. The system does not delete old DataStore entries.
+
+Store names resolve like this:
+
+```text
+AllTime: GenericLeaderboard_Wins
+Daily:   GenericLeaderboard_Wins_Daily_2026-05-26
+Weekly:  GenericLeaderboard_Wins_Weekly_2026-05-25
+```
+
+Daily periods reset at `00:00 UTC`. Weekly periods reset Monday at `00:00 UTC`.
+The weekly suffix uses the UTC date of that Monday.
 
 ## Workspace Display Boards
 
@@ -156,17 +197,19 @@ Optional attributes:
 | Attribute | Type | Default |
 | --- | --- | --- |
 | `LeaderboardTitle` | string | Definition `DisplayName`. |
+| `LeaderboardPeriod` | string | `AllTime`; supports `AllTime`, `Daily`, `Weekly`. |
 | `LeaderboardTopCount` | number | Definition `TopCount`, clamped for display. |
 | `LeaderboardRefreshSeconds` | number | `120`. |
 | `LeaderboardFace` | string | `Front`; supports `Front`, `Back`, `Left`, `Right`, `Top`, `Bottom`. |
 
 Run `commands/CreateWorkspaceLeaderboards.lua` again after changing definitions.
 The script updates existing boards and creates missing boards without duplicating
-boards for the same `LeaderboardId`.
+boards for the same `LeaderboardId` and `LeaderboardPeriod`.
 
 ## DataStore Behavior
 
-- Rankings use `OrderedDataStore` through each definition's `DataStoreName`.
+- All-time rankings use each definition's `DataStoreName` unchanged.
+- Daily and weekly rankings use UTC period suffixes on `DataStoreName`.
 - Writes are debounced so repeated updates for the same player do not immediately
   create repeated DataStore writes.
 - Failed writes are retried with backoff.
@@ -198,6 +241,8 @@ More detail: [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
   analytics.
 - It does not validate whether your gameplay rules are fair; it only keeps final
   leaderboard publishing on the server.
+- It does not calculate daily or weekly stats for your game. Your server must
+  publish the correct period values.
 - Studio DataStore behavior depends on API Services being enabled and the place
   being able to use DataStores.
 

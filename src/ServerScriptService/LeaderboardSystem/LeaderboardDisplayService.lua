@@ -11,6 +11,7 @@ local DEFAULT_TOP_COUNT = 10
 local MAX_DISPLAY_TOP_COUNT = 25
 local DEFAULT_REFRESH_SECONDS = 120
 local DEFAULT_FACE = Enum.NormalId.Front
+local DEFAULT_PERIOD = LeaderboardService.GetDefaultPeriod()
 
 local registeredDisplaysByPart = {}
 local candidateAttributeConnectionsByPart = {}
@@ -127,6 +128,15 @@ local function sanitizeLeaderboardId(value)
 	end
 
 	return leaderboardId
+end
+
+local function getLeaderboardPeriod(part)
+	local attributeValue = part:GetAttribute("LeaderboardPeriod")
+	if type(attributeValue) ~= "string" or attributeValue == "" then
+		return DEFAULT_PERIOD
+	end
+
+	return attributeValue
 end
 
 local function getLeaderboardFolder()
@@ -636,8 +646,9 @@ local function refreshDisplayNow(part, entry)
 		return
 	end
 
+	local period = getLeaderboardPeriod(part)
 	local topCount = getTopCount(part)
-	local snapshot = LeaderboardService.BuildSnapshot(leaderboardId, topCount)
+	local snapshot = LeaderboardService.BuildPeriodSnapshot(leaderboardId, period, topCount)
 
 	if registeredDisplaysByPart[part] == entry then
 		renderSnapshot(part, snapshot, topCount)
@@ -798,8 +809,14 @@ function LeaderboardDisplayService.RegisterDisplayPart(part)
 		return false, "UnknownLeaderboard"
 	end
 
+	local period = getLeaderboardPeriod(part)
+	if not LeaderboardService.IsLeaderboardPeriodEnabled(leaderboardId, period) then
+		return false, "InvalidPeriod"
+	end
+
 	registeredDisplaysByPart[part] = {
 		LeaderboardId = leaderboardId,
+		Period = period,
 		NextRefreshAt = 0,
 	}
 
